@@ -7,8 +7,6 @@
 --  покупателя.
 -- =====================================================================
 
-\pset footer off
-
 select '1. сырые строки перенесены без потерь' as check_name,
        (select count(*) from raw.orders)      as raw_orders,
        (select count(*) from core.fact_order) as model_orders,

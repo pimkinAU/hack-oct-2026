@@ -13,8 +13,6 @@ drop table if exists mart.answer_q3;
 drop table if exists mart.answer_q4;
 drop table if exists mart.answer_q5;
 
-\pset footer off
-
 
 -- ---------------------------------------------------------------------
 -- 1. Выручка и число заказов по месяцам, сентябрь 2016 — август 2018.

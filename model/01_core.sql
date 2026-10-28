@@ -35,6 +35,11 @@ drop table if exists core.dim_seller cascade;
 drop table if exists core.dim_customer cascade;
 drop table if exists core.dim_order_status cascade;
 
+-- схемы создаём здесь, чтобы файл работал и на базе, где их ещё нет
+-- (обычно их делает scripts/load_raw.py, но нам важно запускаться самим)
+create schema if not exists core;
+create schema if not exists mart;
+
 
 -- ---------------------------------------------------------------------
 -- dim_order_status — справочник статусов заказа.
