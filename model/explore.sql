@@ -162,7 +162,7 @@ select count(*) as total,
        round(100.0 * count(*) filter (where orders > 1) / count(*), 2) as pct
 from c;
 
--- 10. Дублиcustomer_unique_id в customers (бывает ли один unique_id на нескольких customer_id)
+-- 10. Дубли customer_unique_id в customers (бывает ли один unique_id на нескольких customer_id)
 select customer_unique_id, count(*) as n
 from raw.customers
 group by 1 having count(*) > 1
