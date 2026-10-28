@@ -12,6 +12,9 @@
 bash scripts/setup.sh
 ```
 
+Что этот скрипт делает шаг за шагом и как читать его ошибки — расписано в
+[../scripts/SCRIPTS.md](../scripts/SCRIPTS.md).
+
 потом модель:
 
 ```bash
