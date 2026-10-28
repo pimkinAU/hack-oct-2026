@@ -1,18 +1,24 @@
 -- =====================================================================
---  РњРѕРґРµР»СЊ РґР°РЅРЅС‹С… Capibara С†РµР»РёРєРѕРј, РѕРґРЅРёРј С„Р°Р№Р»РѕРј.
+--  Модель данных Capibara целиком, одним файлом.
 --
---  Р¤Р°Р№Р» СЃРѕР±СЂР°РЅ СЃРєСЂРёРїС‚РѕРј model/make_all_in_one.ps1 (.sh) РёР· СЃРµРјРё С€Р°РіРѕРІ:
---    01_core.sql     -> СЃС…РµРјР° core (С„Р°РєС‚С‹ Рё РёР·РјРµСЂРµРЅРёСЏ) РёР· raw
---    02_mart.sql     -> РїСЂРµРґСЃС‚Р°РІР»РµРЅРёСЏ mart
---    03_answers.sql  -> РѕС‚РІРµС‚С‹ РЅР° 5 РІРѕРїСЂРѕСЃРѕРІ Р±Р»РѕРєР° Рђ
---    04_checks.sql   -> 10 РїСЂРѕРІРµСЂРѕРє С†РµР»РѕСЃС‚РЅРѕСЃС‚Рё
---    05_history.sql  -> РёСЃС‚РѕСЂРёСЏ Р°РґСЂРµСЃРѕРІ РїРѕРєСѓРїР°С‚РµР»РµР№, РїСЂРѕРґР°РІС†РѕРІ Рё РєР°С‚РµРіРѕСЂРёР№
---    06_block_b.sql  -> РѕС‚РІРµС‚С‹ РЅР° 5 РІРѕРїСЂРѕСЃРѕРІ Р±Р»РѕРєР° Р‘
---    07_checks_b.sql -> 12 РїСЂРѕРІРµСЂРѕРє РёСЃС‚РѕСЂРёРё Рё Р±Р»РѕРєР° Р‘
+--  Файл собран скриптом model/make_all_in_one.ps1 (.sh) из семи шагов:
+--    01_core.sql     -> схема core (факты и измерения) из raw
+--    02_mart.sql     -> представления mart
+--    03_answers.sql  -> ответы на 5 вопросов блока А
+--    04_checks.sql   -> 10 проверок целостности
+--    05_history.sql  -> история адресов покупателей, продавцов и категорий
+--    06_block_b.sql  -> ответы на 5 вопросов блока Б
+--    07_checks_b.sql -> 12 проверок истории и блока Б
 --
---  Р—Р°РїСѓСЃРє:  psql -f model/all_in_one.sql
---  РџРµСЂРµРґ РєР°Р¶РґС‹Рј С€Р°РіРѕРј СЃРІРѕРё С‚Р°Р±Р»РёС†С‹ СѓРґР°Р»СЏСЋС‚СЃСЏ, РїРѕСЌС‚РѕРјСѓ Р·Р°РїСѓСЃРє РјРѕР¶РЅРѕ
---  РїРѕРІС‚РѕСЂСЏС‚СЊ, СЂРµР·СѓР»СЊС‚Р°С‚ РєР°Р¶РґС‹Р№ СЂР°Р· РѕРґРёРЅ Рё С‚РѕС‚ Р¶Рµ.
+--  Запуск:  psql -f model/all_in_one.sql
+--           или docker compose exec -T postgres psql -U hack -d marketplace < model/all_in_one.sql
+--  Перед каждым шагом свои таблицы удаляются, поэтому запуск можно
+--  повторять, результат каждый раз один и тот же.
+--
+--  Этот файл — шапка для all_in_one.sql, его читают оба скрипта сборки.
+--  Текст держим здесь, а не внутри .ps1: Windows PowerShell 5.1 читает
+--  исходники .ps1 не в UTF-8, и кириллица в самом скрипте превращается в
+--  кракозябры. Файл ниже всегда читается явно с -Encoding UTF8.
 -- =====================================================================
 
 -- >>>>>>>>>>>>>>>>>>>>>>>>>>>> 01_core.sql
@@ -999,6 +1005,7 @@ drop view if exists core.v_item_category_as_ordered;
 drop view if exists core.v_order_customer_address;
 drop view if exists core.v_customer_address_version;
 drop view if exists core.v_customer_address_first;
+drop table if exists core.tmp_customer_address;
 drop table if exists core.dim_customer_history;
 drop table if exists core.dim_product_category_history;
 drop table if exists core.dim_seller_history;
@@ -1014,7 +1021,7 @@ drop table if exists core.dim_seller_history;
 --    Шаг 1: смотрим, когда каждый адрес человека встретился впервые и сколько
 --    заказов с этого адреса было.
 --    Шаг 2: оставляем по одной версии на дату. Иногда два разных адреса
---    appear в один день: человек физически не может жить в двух городах,
+--    встречаются в один день: человек физически не может жить в двух городах,
 --    это шум в обезличенной выгрузке. Оставляем тот адрес, с которого заказов
 --    больше, а при равенстве — первый по алфавиту. Так у дат действия версий
 --    не остаётся пересечений, и каждый заказ получает ровно один адрес.
@@ -1119,16 +1126,19 @@ update core.dim_customer_history h
  where h.customer_unique_id = x.customer_unique_id
    and h.valid_from = x.valid_from;
 
--- Сколько версий отбросил выбор «лучшего» адреса на дату: 4 строки из 96 352.
--- Показываем это прямо здесь, чтобы приём не был невидимым.
+-- Сколько версий отбросил выбор «лучшего» адреса на дату: 14 адресов из 96 352
+-- появились в один день с другим адресом того же человека. Показываем замеры
+-- прямо здесь, чтобы приём не был невидимым. Колонки названы по-английски:
+-- кириллический алиас без кавычек ломает запрос, если файл в psql приходит не в
+-- UTF-8 (проверки и ответы при этом живут в строковых литералах и не ломаются).
 select '=== история адресов: замеры ===' as demo,
-       (select count(distinct (customer_unique_id, first_seen)) from core.tmp_customer_address) as версий_по_данным,
-       (select count(*) from core.dim_customer_history) as версий_в_истории,
-       (select count(distinct customer_unique_id) from core.dim_customer_history) as людей,
+       (select count(distinct (customer_unique_id, first_seen)) from core.tmp_customer_address) as versions_in_data,
+       (select count(*) from core.dim_customer_history) as versions_in_history,
+       (select count(distinct customer_unique_id) from core.dim_customer_history) as people,
        (select count(*) from (select customer_unique_id
                                 from core.dim_customer_history
                                group by customer_unique_id
-                              having count(*) > 1) t) as людей_с_двумя_адресами;
+                              having count(*) > 1) t) as people_with_two_addresses;
 
 drop table core.tmp_customer_address;
 
@@ -1254,9 +1264,9 @@ analyze core.dim_seller_history;
 
 select '=== история: сколько версий ===' as demo;
 select 'покупатели' as object,
-       count(distinct customer_unique_id) as объектов,
-       count(*)                           as версий,
-       count(case when is_current then 1 end) as действующих
+       count(distinct customer_unique_id)         as people,
+       count(*)                                   as versions,
+       count(case when is_current then 1 end)     as current_versions
 from core.dim_customer_history
 union all
 select 'продавцы', count(distinct seller_id), count(*), count(case when is_current then 1 end)

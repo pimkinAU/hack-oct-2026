@@ -28,6 +28,7 @@ drop view if exists core.v_item_category_as_ordered;
 drop view if exists core.v_order_customer_address;
 drop view if exists core.v_customer_address_version;
 drop view if exists core.v_customer_address_first;
+drop table if exists core.tmp_customer_address;
 drop table if exists core.dim_customer_history;
 drop table if exists core.dim_product_category_history;
 drop table if exists core.dim_seller_history;
@@ -43,7 +44,7 @@ drop table if exists core.dim_seller_history;
 --    Шаг 1: смотрим, когда каждый адрес человека встретился впервые и сколько
 --    заказов с этого адреса было.
 --    Шаг 2: оставляем по одной версии на дату. Иногда два разных адреса
---    appear в один день: человек физически не может жить в двух городах,
+--    встречаются в один день: человек физически не может жить в двух городах,
 --    это шум в обезличенной выгрузке. Оставляем тот адрес, с которого заказов
 --    больше, а при равенстве — первый по алфавиту. Так у дат действия версий
 --    не остаётся пересечений, и каждый заказ получает ровно один адрес.
@@ -148,16 +149,19 @@ update core.dim_customer_history h
  where h.customer_unique_id = x.customer_unique_id
    and h.valid_from = x.valid_from;
 
--- Сколько версий отбросил выбор «лучшего» адреса на дату: 4 строки из 96 352.
--- Показываем это прямо здесь, чтобы приём не был невидимым.
+-- Сколько версий отбросил выбор «лучшего» адреса на дату: 14 адресов из 96 352
+-- появились в один день с другим адресом того же человека. Показываем замеры
+-- прямо здесь, чтобы приём не был невидимым. Колонки названы по-английски:
+-- кириллический алиас без кавычек ломает запрос, если файл в psql приходит не в
+-- UTF-8 (проверки и ответы при этом живут в строковых литералах и не ломаются).
 select '=== история адресов: замеры ===' as demo,
-       (select count(distinct (customer_unique_id, first_seen)) from core.tmp_customer_address) as версий_по_данным,
-       (select count(*) from core.dim_customer_history) as версий_в_истории,
-       (select count(distinct customer_unique_id) from core.dim_customer_history) as людей,
+       (select count(distinct (customer_unique_id, first_seen)) from core.tmp_customer_address) as versions_in_data,
+       (select count(*) from core.dim_customer_history) as versions_in_history,
+       (select count(distinct customer_unique_id) from core.dim_customer_history) as people,
        (select count(*) from (select customer_unique_id
                                 from core.dim_customer_history
                                group by customer_unique_id
-                              having count(*) > 1) t) as людей_с_двумя_адресами;
+                              having count(*) > 1) t) as people_with_two_addresses;
 
 drop table core.tmp_customer_address;
 
@@ -283,9 +287,9 @@ analyze core.dim_seller_history;
 
 select '=== история: сколько версий ===' as demo;
 select 'покупатели' as object,
-       count(distinct customer_unique_id) as объектов,
-       count(*)                           as версий,
-       count(case when is_current then 1 end) as действующих
+       count(distinct customer_unique_id)         as people,
+       count(*)                                   as versions,
+       count(case when is_current then 1 end)     as current_versions
 from core.dim_customer_history
 union all
 select 'продавцы', count(distinct seller_id), count(*), count(case when is_current then 1 end)
