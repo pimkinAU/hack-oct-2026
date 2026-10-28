@@ -1,12 +1,12 @@
 -- =====================================================================
---  Ответы на пять вопросов из docs/tasks.md (блок А).
+--  Ответы на десять вопросов из docs/tasks.md (блоки А и Б).
 --
 --  Все запросы идут через схему core и витрины mart, напрямую к raw
 --  ни один ответ не обращается. Ответы заодно сохраняем в таблицы
---  mart.answer_q1 ... answer_q5, чтобы цифры можно было перепроверить
+--  mart.answer_q1 ... answer_q10, чтобы цифры можно было перепроверить
 --  и сравнить между запусками.
 --
---  Общие правила для всех пяти ответов:
+--  Общие правила для всех ответов:
 --    * выручка = сумма price по позициям, без доставки (freight);
 --    * в выручку идут только заказы с is_revenue = true. Этот флаг
 --      выставлен один раз в core.dim_order_status (сейчас это только
@@ -14,7 +14,11 @@
 --      fact_order_item, так что список статусов здесь не повторяется;
 --    * у каждого ответа есть контрольный select: он сверяет результат
 --      с контрольными цифрами из задания (24 месяца, 13 221 498.11,
---      159.88, 96 096 / 3.12%, 74 категории).
+--      159.88, 96 096 / 3.12%, 74 категории). У блока Б контрольных
+--      цифр в задании нет, там контрольный select сверяет ответ с
+--      итогами модели (все заказы, все платежи и т.п.);
+--    * штат покупателя (вопросы 7 и 9) — на момент заказа, из
+--      core.fact_order, а не текущий адрес человека.
 --
 --  Порядок блока в каждом вопросе один и тот же:
 --    1) create table mart.answer_qN — сам ответ;
@@ -32,6 +36,12 @@ drop table if exists mart.answer_q2;
 drop table if exists mart.answer_q3;
 drop table if exists mart.answer_q4;
 drop table if exists mart.answer_q5;
+drop table if exists mart.answer_q6;
+drop table if exists mart.answer_q7;
+drop table if exists mart.answer_q8;
+drop table if exists mart.answer_q9;
+drop table if exists mart.answer_q9_type;
+drop table if exists mart.answer_q10;
 
 
 -- ---------------------------------------------------------------------
@@ -280,3 +290,274 @@ select 'control' as check_name,
        round(sum(revenue), 2)      as total_13221498_11,
        round(sum(share_pct), 1)    as shares_sum_pct
 from mart.answer_q5;
+
+
+-- =====================================================================
+--  Блок Б.
+-- =====================================================================
+
+
+-- ---------------------------------------------------------------------
+-- 6. Как менялась цена одного товара.
+--
+--    Берём товар, который продавался по наибольшему числу разных цен,
+--    и показываем, по какой цене и сколько его продали в каждый день.
+--
+--    Откуда берутся цифры:
+--      core.fact_order_item, только is_revenue: «продавался» понимаем
+--      так же, как выручку, — заказ дошёл до покупателя. Цена — price
+--      позиции, без доставки. Дата — день покупки (purchased_at).
+--
+--    Выбор товара: count(distinct price) по товару, при равенстве —
+--    меньший product_id, чтобы ответ не менялся от запуска к запуску.
+--    Подзапрос p — ровно одна строка, к позициям он цепляется join-ом.
+--
+--    Колонки:
+--      sale_date  — день покупки;
+--      price      — цена позиции;
+--      units_sold — сколько единиц продано в этот день по этой цене
+--                   (одна строка позиции = одна единица, как и в вопросе 2).
+--    Если в один день товар уходил по двум ценам, строк за день будет две.
+-- ---------------------------------------------------------------------
+create table mart.answer_q6 as
+select i.purchased_at::date as sale_date,
+       i.price,
+       count(*)             as units_sold
+from core.fact_order_item i
+join (
+    select product_id
+    from core.fact_order_item
+    where is_revenue
+    group by product_id
+    order by count(distinct price) desc, product_id
+    limit 1
+) p on p.product_id = i.product_id
+where i.is_revenue
+group by i.purchased_at::date, i.price
+order by sale_date, price;
+
+select '=== 6. История цены товара ===' as answer;
+
+-- какой товар выбран и сколько у него разных цен
+select i.product_id,
+       max(i.display_category)  as category,
+       count(distinct i.price)  as distinct_prices,
+       min(i.price)             as min_price,
+       max(i.price)             as max_price,
+       count(*)                 as units_sold
+from core.fact_order_item i
+where i.is_revenue
+group by i.product_id
+order by count(distinct i.price) desc, i.product_id
+limit 1;
+
+select * from mart.answer_q6;
+
+-- Контроль к вопросу 6: число разных цен в ответе равно максимуму
+-- по всем товарам, единицы в сумме равны продажам товара.
+select count(distinct price) as distinct_prices,
+       sum(units_sold)       as units_total
+from mart.answer_q6;
+
+
+-- ---------------------------------------------------------------------
+-- 7. Доставка по штатам покупателя.
+--
+--    Только штаты, где не меньше 500 заказов.
+--
+--    Откуда берутся цифры:
+--      mart.v_delivery_state — core.fact_order, доставленные заказы
+--      (is_revenue) с известной датой вручения, по штату покупателя.
+--      Штат — на момент заказа: заказ везли туда, где человек жил тогда,
+--      и переезд после заказа не должен перекидывать его в другой штат.
+--
+--    Колонки:
+--      customer_state    — штат покупателя;
+--      orders            — доставленных заказов, по ним же и порог 500;
+--      avg_delivery_days — средний срок от покупки до вручения, в днях
+--                          (разница дат, без часов);
+--      delayed_pct       — доля заказов, привезённых позже обещанной даты
+--                          (estimated_delivery_date), в процентах.
+--
+--    8 доставленных заказов без даты вручения сюда не входят: срок
+--    для них не посчитать. Порог считаем по тем же заказам, что и средние,
+--    чтобы 500 значило «500 заказов в среднем», а не «500 заказов вообще».
+-- ---------------------------------------------------------------------
+create table mart.answer_q7 as
+select d.customer_state,
+       d.delivered_orders as orders,
+       d.avg_delivery_days,
+       d.delayed_pct
+from mart.v_delivery_state d
+where d.delivered_orders >= 500
+order by d.delivered_orders desc, d.customer_state;
+
+select '=== 7. Доставка по штатам (от 500 заказов) ===' as answer;
+select * from mart.answer_q7;
+
+-- Контроль к вопросу 7: сколько штатов прошло порог и какую часть
+-- доставленных заказов они покрывают.
+select count(*)     as states,
+       sum(orders)  as orders_in_report,
+       (select sum(delivered_orders) from mart.v_delivery_state) as orders_all_states
+from mart.answer_q7;
+
+
+-- ---------------------------------------------------------------------
+-- 8. Воронка статусов.
+--
+--    Сколько заказов в каждом статусе, их доля и сколько из них без
+--    единой позиции.
+--
+--    Откуда берутся цифры:
+--      mart.v_order_status — core.dim_order_status left join
+--      core.fact_order. Здесь все заказы, в любом статусе: воронка про
+--      заказы, а не про выручку. Заказы без позиций есть в fact_order
+--      с items_count = 0 (их 775), поэтому они не теряются.
+--
+--    Колонки:
+--      order_status         — статус;
+--      orders               — заказов в статусе;
+--      share_pct            — доля от всех заказов, в процентах;
+--      orders_without_items — из них без единой позиции.
+--
+--    Порядок — по числу заказов: так видно, что воронка почти вся
+--    в delivered, а без позиций остаются в основном unavailable и canceled.
+-- ---------------------------------------------------------------------
+create table mart.answer_q8 as
+select s.order_status,
+       s.orders,
+       round(100.0 * s.orders / t.total_orders, 2) as share_pct,
+       s.orders_without_items
+from mart.v_order_status s
+cross join (select sum(orders) as total_orders from mart.v_order_status) t
+order by s.orders desc, s.order_status;
+
+select '=== 8. Воронка статусов ===' as answer;
+select * from mart.answer_q8;
+
+-- Контроль к вопросу 8: заказов столько же, сколько в raw (99 441),
+-- без позиций — 775, доли в сумме ~100%.
+select sum(orders)               as orders_expected_99441,
+       sum(orders_without_items) as without_items_expected_775,
+       round(sum(share_pct), 1)  as shares_sum_pct
+from mart.answer_q8;
+
+
+-- ---------------------------------------------------------------------
+-- 9. Способы оплаты и рассрочка.
+--
+--    Две таблицы: по штатам покупателя за 2018 год и по способам оплаты
+--    за весь период.
+--
+--    Откуда берутся цифры:
+--      core.fact_payment — одна строка = один способ оплаты одного заказа,
+--      поэтому «число платежей» — это число строк, а не заказов: заказ,
+--      оплаченный картой и ваучером, даёт два платежа.
+--      Штат — из core.fact_order, на момент заказа. Год — по дате покупки.
+--      Платежи берём только по заказам с is_revenue, как и всю выручку
+--      в модели: деньги отменённых заказов вернулись покупателю.
+--
+--    Колонки (по штатам):
+--      customer_state   — штат покупателя;
+--      payments         — число платежей;
+--      paid             — сумма payment_value (то, что заплатил покупатель,
+--                         вместе с доставкой);
+--      avg_installments — средний срок рассрочки, в платежах.
+--    Колонки (по способам): payment_type, payments, avg_installments.
+--
+--    Рассрочка бывает только у карты, у boleto и ваучера она всегда 1,
+--    поэтому средний срок по штату во многом говорит о доле карт.
+-- ---------------------------------------------------------------------
+create table mart.answer_q9 as
+select fo.customer_state,
+       count(*)                             as payments,
+       round(sum(p.payment_value), 2)       as paid,
+       round(avg(p.installments), 2)        as avg_installments
+from core.fact_payment p
+join core.fact_order fo on fo.order_id = p.order_id
+where p.is_revenue
+  and p.month_start between date '2018-01-01' and date '2018-12-01'
+group by fo.customer_state
+order by paid desc, fo.customer_state;
+
+create table mart.answer_q9_type as
+select p.payment_type,
+       count(*)                             as payments,
+       round(avg(p.installments), 2)        as avg_installments
+from core.fact_payment p
+where p.is_revenue
+group by p.payment_type
+order by payments desc, p.payment_type;
+
+select '=== 9. Оплата по штатам за 2018 год ===' as answer;
+select * from mart.answer_q9;
+
+select '=== 9. Способы оплаты, весь период ===' as answer;
+select * from mart.answer_q9_type;
+
+-- Контроль к вопросу 9: сумма по штатам равна всем платежам 2018 года
+-- по доставленным заказам (штат не потерялся на join), а число
+-- платежей по способам — всем платежам доставленных заказов.
+select (select sum(paid) from mart.answer_q9)       as paid_by_states,
+       (select round(sum(payment_value), 2)
+        from core.fact_payment
+        where is_revenue
+          and month_start between date '2018-01-01' and date '2018-12-01')
+                                                    as paid_2018_total,
+       (select sum(payments) from mart.answer_q9_type) as payments_by_type,
+       (select count(*) from core.fact_payment where is_revenue)
+                                                    as payments_total;
+
+
+-- ---------------------------------------------------------------------
+-- 10. Связь оценки покупателя со сроком доставки.
+--
+--    Для каждой оценки 1–5 — сколько заказов, средний срок доставки
+--    и доля опозданий.
+--
+--    Откуда берутся цифры:
+--      core.fact_review (одна строка = отзыв) + core.fact_order
+--      (срок и опоздание считаются на заказ). Только доставленные заказы
+--      с датой вручения, как в вопросе 7.
+--
+--    Уровень: оценка — свойство отзыва, а срок — свойство заказа.
+--    Берём пары (заказ, оценка) через distinct: если у заказа два отзыва
+--    с одной оценкой, он считается один раз; если оценки разные (бывает
+--    у заказов с 2–3 отзывами), заказ попадает в обе строки — его срок
+--    действительно связан с обеими оценками. Средний балл заказа
+--    (review_score_avg) здесь не годится: 4.5 не попадает ни в одну оценку.
+--
+--    Колонки:
+--      review_score      — оценка 1..5;
+--      orders            — заказов с такой оценкой;
+--      avg_delivery_days — средний срок доставки, в днях;
+--      delayed_pct       — доля опоздавших заказов, в процентах.
+-- ---------------------------------------------------------------------
+create table mart.answer_q10 as
+select r.review_score,
+       count(*)                                            as orders,
+       round(avg(fo.delivery_days)::numeric, 2)            as avg_delivery_days,
+       round(100.0 * count(case when fo.is_delayed then 1 end) / count(*), 2) as delayed_pct
+from (select distinct order_id, review_score
+      from core.fact_review
+      where review_score between 1 and 5) r
+join core.fact_order fo on fo.order_id = r.order_id
+where fo.is_revenue
+  and fo.delivery_days is not null
+group by r.review_score
+order by r.review_score;
+
+select '=== 10. Оценка и срок доставки ===' as answer;
+select * from mart.answer_q10;
+
+-- Контроль к вопросу 10: строк ровно 5, и сколько заказов попало
+-- в две оценки сразу (разница между суммой строк и числом заказов).
+select count(*)                     as scores_expected_5,
+       sum(orders)                  as order_score_pairs,
+       (select count(distinct r.order_id)
+        from core.fact_review r
+        join core.fact_order fo on fo.order_id = r.order_id
+        where fo.is_revenue and fo.delivery_days is not null
+          and r.review_score between 1 and 5) as orders_distinct
+from mart.answer_q10;

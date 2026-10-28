@@ -15,6 +15,8 @@ drop view if exists mart.v_category_revenue;
 drop view if exists mart.v_customer_base;
 drop view if exists mart.v_delivery_month;
 drop view if exists mart.v_payment_mix;
+drop view if exists mart.v_order_status;
+drop view if exists mart.v_delivery_state;
 
 
 -- Выручка и заказы по месяцам. Считаем ОТ календаря, а не от заказов:
@@ -69,10 +71,15 @@ select cu.customer_unique_id,
        count(distinct fo.order_id)             as orders_total,
        count(distinct case when fo.is_revenue then fo.order_id end) as orders_revenue,
        coalesce(sum(case when fo.is_revenue then fo.goods_total else 0 end), 0) as revenue,
-       max(cu.customer_city)                   as customer_city,
-       max(cu.customer_state)                  as customer_state
+       max(ad.customer_city)                   as customer_city,
+       max(ad.customer_state)                  as customer_state
 from core.dim_customer cu
 join core.fact_order fo on fo.customer_id = cu.customer_id
+-- город и штат — ТЕКУЩИЙ адрес человека (последняя версия), а не
+-- случайный из его заказов: адрес на момент заказа лежит в fact_order
+left join core.dim_customer_address ad
+       on ad.customer_unique_id = cu.customer_unique_id
+      and ad.is_current
 group by cu.customer_unique_id;
 
 
@@ -98,3 +105,33 @@ select p.month_start,
 from core.fact_payment p
 where p.is_revenue
 group by p.month_start, p.payment_type;
+
+
+-- Воронка статусов: все заказы, в любом статусе. Сколько из них
+-- без единой позиции — отдельной колонкой (это в основном unavailable
+-- и canceled: заказ создан, а товара так и не оказалось).
+create view mart.v_order_status as
+select st.order_status,
+       st.status_group,
+       st.is_revenue,
+       count(fo.order_id)                              as orders,
+       count(case when fo.items_count = 0 then 1 end)  as orders_without_items
+from core.dim_order_status st
+left join core.fact_order fo on fo.order_status = st.order_status
+group by st.order_status, st.status_group, st.is_revenue;
+
+
+-- Доставка по штату покупателя. Штат — на момент заказа (из fact_order),
+-- а не текущий: если человек переехал, его старые заказы остаются
+-- в том штате, куда их везли. Только доставленные заказы, у которых
+-- есть дата вручения, иначе срок доставки не посчитать.
+create view mart.v_delivery_state as
+select fo.customer_state,
+       count(*)                                            as delivered_orders,
+       count(case when fo.is_delayed then 1 end)           as delayed_orders,
+       round(100.0 * count(case when fo.is_delayed then 1 end) / count(*), 2) as delayed_pct,
+       round(avg(fo.delivery_days)::numeric, 2)            as avg_delivery_days
+from core.fact_order fo
+where fo.is_revenue
+  and fo.delivery_days is not null
+group by fo.customer_state;
